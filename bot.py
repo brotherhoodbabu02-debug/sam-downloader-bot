@@ -18,7 +18,6 @@ from telegram.ext import (
     filters,
 )
 
-
 # =========================================================
 # SETTINGS
 # =========================================================
@@ -32,12 +31,10 @@ PUBLIC_URL = os.environ.get(
     ""
 ).rstrip("/")
 
-
 # Maximum download size: 2 GB
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 
-
-# Websites that must NOT be downloaded
+# Websites that are NOT allowed
 BLOCKED_DOMAINS = {
     "youtube.com",
     "youtu.be",
@@ -66,69 +63,43 @@ telegram_app = (
 
 
 # =========================================================
-# HELPERS
+# DOMAIN CHECK
 # =========================================================
 
-def is_blocked_url(url: str) -> bool:
-    """
-    Returns True if the URL belongs to YouTube,
-    Instagram or Pinterest.
-    """
-
+def get_domain(url):
     try:
-        hostname = urlparse(url).hostname or ""
-        hostname = hostname.lower().removeprefix("www.")
+        hostname = urlparse(url).hostname
 
-        for domain in BLOCKED_DOMAINS:
-            if hostname == domain:
-                return True
+        if not hostname:
+            return ""
 
-            if hostname.endswith("." + domain):
-                return True
+        hostname = hostname.lower()
 
-        return False
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+
+        return hostname
 
     except Exception:
+        return ""
+
+
+def is_blocked_domain(url):
+
+    domain = get_domain(url)
+
+    if not domain:
         return False
 
+    for blocked in BLOCKED_DOMAINS:
 
-def is_valid_url(url: str) -> bool:
-    """
-    Basic HTTP/HTTPS URL validation.
-    """
+        if domain == blocked:
+            return True
 
-    try:
-        parsed = urlparse(url)
+        if domain.endswith("." + blocked):
+            return True
 
-        return (
-            parsed.scheme in ("http", "https")
-            and bool(parsed.netloc)
-        )
-
-    except Exception:
-        return False
-
-
-def find_downloaded_file(folder: str):
-    """
-    Finds the largest downloaded file in the temporary folder.
-    """
-
-    files = []
-
-    for filename in os.listdir(folder):
-        full_path = os.path.join(folder, filename)
-
-        if os.path.isfile(full_path):
-            files.append(full_path)
-
-    if not files:
-        return None
-
-    return max(
-        files,
-        key=os.path.getsize
-    )
+    return False
 
 
 # =========================================================
@@ -142,12 +113,15 @@ async def start(
 
     await update.message.reply_text(
         "👋 Welcome to Sam Downloader Bot!\n\n"
-        "🔗 Send a public/permitted video URL.\n\n"
-        "✅ Most supported websites\n"
-        "❌ YouTube\n"
-        "❌ Instagram\n"
-        "❌ Pinterest\n\n"
-        "⚠️ Only download content you are "
+        "🔗 Send a public video URL.\n\n"
+        "✅ Supported:\n"
+        "• Public website videos\n"
+        "• Other yt-dlp supported websites\n\n"
+        "🚫 Not supported:\n"
+        "• YouTube\n"
+        "• Instagram\n"
+        "• Pinterest\n\n"
+        "⚠️ Download only content you are "
         "allowed to download."
     )
 
@@ -161,42 +135,39 @@ async def download(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message:
-        return
-
-    if not update.message.text:
+    if not update.message or not update.message.text:
         return
 
     url = update.message.text.strip()
 
-
     # -----------------------------------------------------
-    # URL VALIDATION
+    # URL CHECK
     # -----------------------------------------------------
 
-    if not is_valid_url(url):
+    if not (
+        url.startswith("http://")
+        or url.startswith("https://")
+    ):
 
         await update.message.reply_text(
-            "❌ Please send a valid website video URL."
+            "❌ Please send a valid website URL."
         )
 
         return
 
-
     # -----------------------------------------------------
-    # BLOCK YOUTUBE / INSTAGRAM / PINTEREST
+    # BLOCKED WEBSITE CHECK
     # -----------------------------------------------------
 
-    if is_blocked_url(url):
+    if is_blocked_domain(url):
 
         await update.message.reply_text(
-            "❌ This website is not supported.\n\n"
+            "🚫 This website is not supported.\n\n"
             "YouTube, Instagram and Pinterest "
             "downloads are disabled."
         )
 
         return
-
 
     # -----------------------------------------------------
     # PROCESSING MESSAGE
@@ -206,21 +177,20 @@ async def download(
         "⏳ Processing your link..."
     )
 
-
-    # -----------------------------------------------------
-    # TEMPORARY FOLDER
-    # -----------------------------------------------------
+    # Temporary folder
 
     folder = tempfile.mkdtemp()
 
-
     try:
+
+        # -------------------------------------------------
+        # OUTPUT
+        # -------------------------------------------------
 
         output_template = os.path.join(
             folder,
             "video.%(ext)s"
         )
-
 
         # -------------------------------------------------
         # YT-DLP OPTIONS
@@ -228,38 +198,39 @@ async def download(
 
         ydl_options = {
 
-            # Best available single format
+            # Best available single file.
+            # Avoids requiring ffmpeg for merging.
             "format": "best",
 
             "outtmpl": output_template,
 
-            # Do not download playlists
             "noplaylist": True,
 
-            # Logging
             "quiet": False,
+
             "no_warnings": False,
-
-            # Do not download subtitles
-            "writesubtitles": False,
-
-            # Do not download thumbnails
-            "writethumbnail": False,
 
             # Network retries
             "retries": 5,
+
             "fragment_retries": 5,
+
+            "file_access_retries": 3,
+
+            # Do not download extra files
+            "writesubtitles": False,
+
+            "writeautomaticsub": False,
+
+            "writethumbnail": False,
 
             # Continue partial downloads
             "continuedl": True,
 
-            # Do not overwrite existing files
+            # Do not overwrite existing file
             "overwrites": False,
 
-            # Limit filename problems
-            "restrictfilenames": True,
         }
-
 
         # -------------------------------------------------
         # DOWNLOAD FUNCTION
@@ -278,35 +249,40 @@ async def download(
 
                 return ydl.prepare_filename(info)
 
+        # Run downloader in background thread
 
-        await msg.edit_text(
-            "⬇️ Downloading..."
-        )
-
-
-        # Run yt-dlp in another thread
         file_path = await asyncio.to_thread(
             perform_download
         )
 
-
         # -------------------------------------------------
-        # FIND FILE
+        # FIND DOWNLOADED FILE
         # -------------------------------------------------
 
         if not os.path.exists(file_path):
 
-            file_path = find_downloaded_file(
-                folder
-            )
+            downloaded_files = []
 
+            for filename in os.listdir(folder):
 
-        if not file_path:
+                full_path = os.path.join(
+                    folder,
+                    filename
+                )
 
-            raise FileNotFoundError(
-                "Downloaded file not found."
-            )
+                if os.path.isfile(full_path):
 
+                    downloaded_files.append(
+                        full_path
+                    )
+
+            if not downloaded_files:
+
+                raise FileNotFoundError(
+                    "Downloaded file not found."
+                )
+
+            file_path = downloaded_files[0]
 
         # -------------------------------------------------
         # FILE SIZE
@@ -316,21 +292,7 @@ async def download(
             file_path
         )
 
-
-        file_size_mb = (
-            file_size / (1024 * 1024)
-        )
-
-
-        print(
-            f"Downloaded file size: "
-            f"{file_size_mb:.2f} MB"
-        )
-
-
-        # -------------------------------------------------
-        # 2 GB CHECK
-        # -------------------------------------------------
+        # 2 GB limit
 
         if file_size > MAX_FILE_SIZE:
 
@@ -341,92 +303,51 @@ async def download(
 
             return
 
-
         # -------------------------------------------------
-        # TELEGRAM UPLOAD
+        # UPLOAD
         # -------------------------------------------------
 
         await msg.edit_text(
-            "📤 Preparing upload..."
+            "📤 Download completed!\n"
+            "⏳ Sending file to Telegram..."
         )
 
+        with open(
+            file_path,
+            "rb"
+        ) as video_file:
 
-        # NOTE:
-        # Telegram's standard cloud Bot API has its
-        # own upload/file-size limits.
-        #
-        # Therefore a file being <= 2 GB does NOT mean
-        # the standard Bot API can necessarily send it.
-        #
-        # Small files will be sent normally.
+            await update.message.reply_document(
+                document=video_file,
+                filename=os.path.basename(
+                    file_path
+                ),
+                caption=(
+                    "🎬 Download completed!\n\n"
+                    "🤖 Sam Downloader Bot"
+                )
+            )
 
+        # Delete processing message
 
         try:
 
-            with open(
-                file_path,
-                "rb"
-            ) as video_file:
-
-                await update.message.reply_document(
-                    document=video_file,
-                    filename=os.path.basename(
-                        file_path
-                    ),
-                    caption=(
-                        "🎬 Download completed!\n\n"
-                        "🤖 Sam Downloader Bot"
-                    )
-                )
-
-
             await msg.delete()
 
+        except Exception:
 
-        except Exception as upload_error:
-
-            print(
-                "UPLOAD ERROR:"
-            )
-
-            print(
-                repr(upload_error)
-            )
-
-
-            await msg.edit_text(
-                "⚠️ Download completed, but "
-                "Telegram could not upload/send "
-                "this file.\n\n"
-                f"📦 File size: "
-                f"{file_size_mb:.1f} MB\n\n"
-                "The website download itself "
-                "was successful."
-            )
-
+            pass
 
     # =====================================================
     # ERRORS
     # =====================================================
 
-    except Exception as error:
+    except yt_dlp.utils.DownloadError as error:
 
-        print(
-            "\n=============================="
-        )
-
-        print(
-            "DOWNLOAD ERROR:"
-        )
-
-        print(
-            repr(error)
-        )
-
-        print(
-            "==============================\n"
-        )
-
+        print("\n==============================")
+        print("YT-DLP DOWNLOAD ERROR:")
+        print(repr(error))
+        print("==============================\n")
 
         try:
 
@@ -434,21 +355,40 @@ async def download(
                 "❌ Download failed.\n\n"
                 "Possible reasons:\n"
                 "• Website is not supported\n"
-                "• Video is unavailable/private\n"
+                "• Video is private/unavailable\n"
                 "• Download is not permitted\n"
                 "• Website requires login\n"
-                "• DRM protected video\n"
-                "• Temporary network error\n\n"
-                "Please try another public URL."
+                "• Temporary network problem\n"
+                "• Video is too large\n\n"
+                "Please try another public website URL."
             )
 
         except Exception:
+
             pass
 
+    except Exception as error:
+
+        print("\n==============================")
+        print("DOWNLOAD ERROR:")
+        print(repr(error))
+        print("==============================\n")
+
+        try:
+
+            await msg.edit_text(
+                "❌ Download failed.\n\n"
+                "Please try another public video URL."
+            )
+
+        except Exception:
+
+            pass
 
     finally:
 
-        # Delete temporary files
+        # Remove temporary files
+
         shutil.rmtree(
             folder,
             ignore_errors=True
@@ -462,9 +402,7 @@ async def download(
 @web_app.get("/")
 async def home():
 
-    return (
-        "🤖 Sam Downloader Bot is running!"
-    )
+    return "🤖 Sam Downloader Bot is running!"
 
 
 # =========================================================
@@ -509,11 +447,9 @@ telegram_app.add_handler(
     )
 )
 
-
 telegram_app.add_handler(
     MessageHandler(
-        filters.TEXT
-        & ~filters.COMMAND,
+        filters.TEXT & ~filters.COMMAND,
         download
     )
 )
@@ -529,14 +465,13 @@ async def main():
         "🤖 Starting Sam Downloader Bot..."
     )
 
-
     # Initialize Telegram
+
     await telegram_app.initialize()
 
-
     # Start application
-    await telegram_app.start()
 
+    await telegram_app.start()
 
     # -----------------------------------------------------
     # WEBHOOK
@@ -548,12 +483,10 @@ async def main():
             f"{PUBLIC_URL}/telegram"
         )
 
-
         await telegram_app.bot.set_webhook(
             url=webhook_url,
             allowed_updates=Update.ALL_TYPES
         )
-
 
         print(
             "✅ Webhook set:"
@@ -569,7 +502,6 @@ async def main():
             "⚠️ RENDER_EXTERNAL_URL not found."
         )
 
-
     # -----------------------------------------------------
     # WEB SERVER
     # -----------------------------------------------------
@@ -580,11 +512,9 @@ async def main():
         f"0.0.0.0:{PORT}"
     ]
 
-
     print(
         "🌐 Web server starting..."
     )
-
 
     await serve(
         web_app,
@@ -600,4 +530,4 @@ if __name__ == "__main__":
 
     asyncio.run(
         main()
-)
+    )
